@@ -41,6 +41,21 @@ python app.py
 
 Then open `http://127.0.0.1:8000`.
 
+## Credentials
+
+Local credentials live in `.env`, which is ignored by git. Use `.env.example`
+as the safe template and keep `LIVE_TRADING_ENABLED=false` until the app has a
+verified live adapter and an explicit operator approval.
+
+Webull OpenAPI uses one shared `WEBULL_APP_KEY` and `WEBULL_APP_SECRET` for
+Trading API and Market Data API access. Keep the app secret server-side only;
+do not put it in React or any browser-delivered code.
+
+The current Webull configuration targets production with stocks and ETFs only:
+`WEBULL_ALLOWED_PRODUCTS=stocks,etfs`. Market data is set to a free-first policy
+so the app should use only data available under the current OpenAPI permissions
+until paid quote subscriptions are intentionally added.
+
 ## Project Shape
 
 - `src/trading_trainer/models.py` - shared trading data models.
@@ -50,12 +65,12 @@ Then open `http://127.0.0.1:8000`.
 - `src/trading_trainer/agent.py` - agent loop that proposes and routes orders.
 - `src/trading_trainer/promotion.py` - paper-to-live promotion evaluator.
 - `src/trading_trainer/live.py` - intentionally disabled live broker stub.
+- `src/trading_trainer/settings.py` - dependency-free `.env` settings loader.
 - `app.py` - single Python entrypoint for the dashboard and API.
 - `frontend/` - React dashboard served by `app.py`.
 
 ## Broker Direction
 
-For a serious paper-to-live path, prefer brokers with official paper and live
-APIs, such as Alpaca or Interactive Brokers. Webull paper automation is possible
-through unofficial packages, but that is a brittle integration target and should
-be kept behind a broker adapter.
+Keep broker-specific execution behind adapters. Webull Trading API can be the
+live adapter once SDK token setup, 2FA handling, account routing, order mapping,
+and dashboard approval controls are verified end to end.

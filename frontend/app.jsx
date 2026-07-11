@@ -3,6 +3,7 @@ const { useEffect, useMemo, useState } = React;
 function App() {
   const [data, setData] = useState(null);
   const [error, setError] = useState("");
+  const [saving, setSaving] = useState(false);
   const [activeTab, setActiveTab] = useState("overview");
 
   async function loadDashboard() {
@@ -59,7 +60,32 @@ function App() {
           <Tabs activeTab={activeTab} onChange={setActiveTab} />
           {activeTab === "overview" && <Overview data={data} />}
           {activeTab === "trades" && <Trades fills={data.fills} />}
-          {activeTab === "controls" && <Controls criteria={data.promotion.criteria} />}
+          {activeTab === "controls" && (
+            <Controls
+              data={data}
+              saving={saving}
+              onSave={async (payload) => {
+                setSaving(true);
+                setError("");
+                try {
+                  const response = await fetch("/api/settings", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify(payload),
+                  });
+                  const nextData = await response.json();
+                  if (!response.ok) {
+                    throw new Error(nextData.error || `Settings API returned ${response.status}`);
+                  }
+                  setData(nextData);
+                } catch (err) {
+                  setError(err.message);
+                } finally {
+                  setSaving(false);
+                }
+              }}
+            />
+          )}
         </section>
       </section>
     </main>
@@ -267,25 +293,141 @@ function Trades({ fills }) {
   );
 }
 
-function Controls({ criteria }) {
+function Controls({ data, saving, onSave }) {
+  const criteria = data.promotion.criteria;
+  const settings = data.settings;
+  const [allowedProducts, setAllowedProducts] = useState(settings.allowed_products);
+  const [liveEnabled, setLiveEnabled] = useState(settings.live_trading_enabled);
+  const [operatorOverride, setOperatorOverride] = useState(settings.live_trading_operator_override);
+  const [confirming, setConfirming] = useState(false);
+
+  useEffect(() => {
+    setAllowedProducts(settings.allowed_products);
+    setLiveEnabled(settings.live_trading_enabled);
+    setOperatorOverride(settings.live_trading_operator_override);
+  }, [settings]);
+
+  const gatePassed = data.promotion.approved_for_human_review;
+  const liveNeedsOverride = liveEnabled && !gatePassed;
+
+  function toggleProduct(product) {
+    setAllowedProducts((current) => {
+      if (current.includes(product)) {
+        return current.length === 1 ? current : current.filter((item) => item !== product);
+      }
+      return [...current, product];
+    });
+  }
+
+  function submitSettings(confirmation = "") {
+    onSave({
+      allowed_products: allowedProducts,
+      live_trading_enabled: liveEnabled,
+      live_trading_operator_override: liveNeedsOverride ? operatorOverride : false,
+      confirmation,
+    });
+  }
+
+  function saveControls() {
+    if (liveNeedsOverride && operatorOverride) {
+      setConfirming(true);
+      return;
+    }
+    submitSettings();
+  }
+
   return (
-    <section className="panel">
-      <div className="panelHeader">
-        <h2>Live Transition Rules</h2>
-        <span>read only</span>
+    <section className="controlsStack">
+      <div className="panel">
+        <div className="panelHeader">
+          <h2>Live Transition Rules</h2>
+          <span>{settings.live_trading_allowed ? "enabled" : "guarded"}</span>
+        </div>
+        <div className="controlGrid">
+          <ReadOnlyControl label="Minimum return" value={percent(criteria.min_total_return)} />
+          <ReadOnlyControl label="Calendar days" value={criteria.min_calendar_days} />
+          <ReadOnlyControl label="Sustained snapshots" value={criteria.sustained_return_days} />
+          <ReadOnlyControl label="Max drawdown" value={percent(criteria.max_drawdown)} />
+          <ReadOnlyControl label="Minimum trades" value={criteria.min_trades} />
+          <ReadOnlyControl label="Risk violations" value={`≤ ${criteria.max_risk_violations}`} />
+        </div>
+        <div className="switchRow">
+          <div>
+            <strong>Live trading</strong>
+            <span>
+              {gatePassed
+                ? "Promotion gate is ready for human approval."
+                : "Blocked unless you explicitly override from this dashboard."}
+            </span>
+          </div>
+          <label className="switch">
+            <input
+              type="checkbox"
+              checked={liveEnabled}
+              onChange={(event) => {
+                setLiveEnabled(event.target.checked);
+                if (!event.target.checked) {
+                  setOperatorOverride(false);
+                }
+              }}
+            />
+            <span />
+          </label>
+        </div>
+        {liveEnabled && !gatePassed && (
+          <label className="checkRow">
+            <input
+              type="checkbox"
+              checked={operatorOverride}
+              onChange={(event) => setOperatorOverride(event.target.checked)}
+            />
+            <span>Allow operator override before the 20% / 5-month gate passes</span>
+          </label>
+        )}
+        <div className={`notice ${settings.live_trading_allowed ? "success" : ""}`}>
+          <strong>{settings.live_trading_allowed ? "Live trading can be armed." : "Real-money execution remains locked."}</strong>
+          <span>
+            Unlock source: {settings.live_unlock_source.replace("_", " ")}. 2FA token setup is still required before Webull live order routing.
+          </span>
+        </div>
       </div>
-      <div className="controlGrid">
-        <ReadOnlyControl label="Minimum return" value={percent(criteria.min_total_return)} />
-        <ReadOnlyControl label="Calendar days" value={criteria.min_calendar_days} />
-        <ReadOnlyControl label="Sustained snapshots" value={criteria.sustained_return_days} />
-        <ReadOnlyControl label="Max drawdown" value={percent(criteria.max_drawdown)} />
-        <ReadOnlyControl label="Minimum trades" value={criteria.min_trades} />
-        <ReadOnlyControl label="Risk violations" value={`≤ ${criteria.max_risk_violations}`} />
+
+      <div className="panel">
+        <div className="panelHeader">
+          <h2>Allowed Products</h2>
+          <span>{data.environment}</span>
+        </div>
+        <div className="productGrid">
+          {settings.allowed_product_options.map((product) => (
+            <label className="productOption" key={product}>
+              <input
+                type="checkbox"
+                checked={allowedProducts.includes(product)}
+                onChange={() => toggleProduct(product)}
+              />
+              <span>{productLabel(product)}</span>
+            </label>
+          ))}
+        </div>
+        <div className="notice">
+          <strong>Market data policy: free first.</strong>
+          <span>Use Webull data available under current OpenAPI permissions and avoid paid quote subscriptions until you choose to add them.</span>
+        </div>
+        <button className="saveButton" disabled={saving || (liveNeedsOverride && !operatorOverride)} onClick={saveControls}>
+          {saving ? "Saving..." : "Save controls"}
+        </button>
       </div>
-      <div className="notice">
-        <strong>Real-money execution remains disabled.</strong>
-        <span>The live broker adapter is a stub until a separate approval path is implemented.</span>
-      </div>
+
+      {confirming && (
+        <ConfirmLiveDialog
+          phrase={settings.live_confirmation_phrase}
+          onCancel={() => setConfirming(false)}
+          onConfirm={(phrase) => {
+            setConfirming(false);
+            submitSettings(phrase);
+          }}
+        />
+      )}
     </section>
   );
 }
@@ -297,6 +439,47 @@ function ReadOnlyControl({ label, value }) {
       <input value={value} readOnly />
     </label>
   );
+}
+
+function ConfirmLiveDialog({ phrase, onCancel, onConfirm }) {
+  const [typed, setTyped] = useState("");
+  const canConfirm = typed.trim() === phrase;
+
+  return (
+    <div className="modalBackdrop" role="presentation">
+      <section className="modal" role="dialog" aria-modal="true" aria-labelledby="live-confirm-title">
+        <div className="panelHeader">
+          <h2 id="live-confirm-title">Confirm Live Trading</h2>
+          <span>prod</span>
+        </div>
+        <p className="muted">
+          This enables a real-money override before the promotion gate has passed. Type the exact confirmation phrase to continue.
+        </p>
+        <label className="readOnlyControl">
+          <span>{phrase}</span>
+          <input value={typed} onChange={(event) => setTyped(event.target.value)} autoFocus />
+        </label>
+        <div className="modalActions">
+          <button className="secondaryButton" onClick={onCancel}>Cancel</button>
+          <button className="dangerButton" disabled={!canConfirm} onClick={() => onConfirm(typed.trim())}>
+            Enable live override
+          </button>
+        </div>
+      </section>
+    </div>
+  );
+}
+
+function productLabel(product) {
+  const labels = {
+    stocks: "Stocks",
+    etfs: "ETFs",
+    options: "Options",
+    futures: "Futures",
+    crypto: "Crypto",
+    event_contracts: "Event contracts",
+  };
+  return labels[product] || product;
 }
 
 function money(value) {

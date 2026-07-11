@@ -24,7 +24,13 @@ from trading_trainer.broker import PaperBroker
 from trading_trainer.models import Bar
 from trading_trainer.promotion import PromotionEvaluator
 from trading_trainer.risk import RiskLimits, RiskManager
+from trading_trainer.settings import load_settings
 from trading_trainer.strategy import MovingAverageCrossoverStrategy, StrategyConfig
+
+
+ENV_PATH = ROOT / ".env"
+ALLOWED_PRODUCT_OPTIONS = ("stocks", "etfs", "options", "futures", "crypto", "event_contracts")
+LIVE_CONFIRMATION_PHRASE = "ENABLE LIVE TRADING"
 
 
 def main() -> None:
@@ -64,13 +70,32 @@ class DashboardHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(file_path.read_bytes())
 
+    def do_POST(self) -> None:
+        parsed = urlparse(self.path)
+        if parsed.path != "/api/settings":
+            self.send_error(HTTPStatus.NOT_FOUND)
+            return
+
+        try:
+            length = int(self.headers.get("Content-Length", "0"))
+            raw_body = self.rfile.read(length).decode("utf-8") if length else "{}"
+            payload = json.loads(raw_body)
+            updated = update_dashboard_settings(payload)
+        except ValueError as exc:
+            self._send_json({"error": str(exc)}, status=HTTPStatus.BAD_REQUEST)
+            return
+
+        self._send_json(updated)
+
     def log_message(self, format: str, *args: object) -> None:
         timestamp = datetime.now().strftime("%H:%M:%S")
         print(f"[{timestamp}] {self.address_string()} {format % args}")
 
-    def _send_json(self, payload: dict[str, object]) -> None:
+    def _send_json(
+        self, payload: dict[str, object], status: HTTPStatus = HTTPStatus.OK
+    ) -> None:
         body = json.dumps(payload).encode("utf-8")
-        self.send_response(HTTPStatus.OK)
+        self.send_response(status)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
@@ -78,17 +103,24 @@ class DashboardHandler(BaseHTTPRequestHandler):
 
 
 def build_dashboard_payload() -> dict[str, object]:
+    settings = load_settings(ENV_PATH)
     agent = run_paper_simulation()
     report = PromotionEvaluator().evaluate(agent.snapshots)
     latest = agent.snapshots[-1]
     first = agent.snapshots[0]
     criteria = PromotionEvaluator().criteria
+    live_unlock_source = _live_unlock_source(
+        report.approved_for_human_review, settings.live_trading_operator_override
+    )
+    live_trading_allowed = settings.live_trading_enabled and live_unlock_source != "locked"
 
     return {
         "mode": "paper",
         "status": "locked" if not report.approved_for_human_review else "review_ready",
+        "environment": settings.webull_env,
         "generated_at": datetime.now().isoformat(timespec="seconds"),
         "account": {
+            "webull_account_id": settings.webull_account_id,
             "starting_cash": agent.broker.starting_cash,
             "equity": latest.equity,
             "cash": latest.cash,
@@ -141,7 +173,110 @@ def build_dashboard_payload() -> dict[str, object]:
             "learning_state": "simulation replay",
             "next_live_step": "disabled until promotion review passes",
         },
+        "settings": {
+            "allowed_products": list(settings.webull_allowed_products),
+            "allowed_product_options": list(ALLOWED_PRODUCT_OPTIONS),
+            "market_data_policy": settings.market_data_policy,
+            "market_data_plan": {
+                "mode": "free_first",
+                "sources": [
+                    "Webull account and position endpoints",
+                    "Webull quote snapshots available under current OpenAPI permissions",
+                    "Delayed/free historical bars when available",
+                ],
+                "paid_data_required": [
+                    "OpenAPI L1/L2 stock and ETF non-display subscriptions",
+                    "OPRA real-time options data",
+                    "OpenAPI futures market data",
+                ],
+            },
+            "live_trading_enabled": settings.live_trading_enabled,
+            "live_trading_operator_override": settings.live_trading_operator_override,
+            "live_trading_allowed": live_trading_allowed,
+            "live_unlock_source": live_unlock_source,
+            "live_confirmation_phrase": LIVE_CONFIRMATION_PHRASE,
+            "requires_2fa_token": True,
+        },
     }
+
+
+def update_dashboard_settings(payload: dict[str, object]) -> dict[str, object]:
+    if not isinstance(payload, dict):
+        raise ValueError("Settings payload must be a JSON object.")
+
+    current = build_dashboard_payload()
+    promotion = current["promotion"]
+    requested_products = _clean_products(payload.get("allowed_products", []))
+    live_enabled = bool(payload.get("live_trading_enabled", False))
+    operator_override = bool(payload.get("live_trading_operator_override", False))
+
+    if live_enabled and operator_override:
+        confirmation = str(payload.get("confirmation", "")).strip()
+        if confirmation != LIVE_CONFIRMATION_PHRASE:
+            raise ValueError("Live trading override requires the exact confirmation phrase.")
+
+    if live_enabled and not promotion["approved_for_human_review"] and not operator_override:
+        raise ValueError("Live trading requires either a passed promotion gate or operator override.")
+
+    updates = {
+        "WEBULL_ALLOWED_PRODUCTS": ",".join(requested_products),
+        "MARKET_DATA_POLICY": "free",
+        "LIVE_TRADING_ENABLED": _bool_env(live_enabled),
+        "LIVE_TRADING_OPERATOR_OVERRIDE": _bool_env(operator_override),
+    }
+    _update_env_file(ENV_PATH, updates)
+    return build_dashboard_payload()
+
+
+def _clean_products(raw_products: object) -> list[str]:
+    if not isinstance(raw_products, list):
+        raise ValueError("Allowed products must be a list.")
+    products = []
+    for item in raw_products:
+        product = str(item).strip().lower()
+        if product not in ALLOWED_PRODUCT_OPTIONS:
+            raise ValueError(f"Unsupported product: {product}")
+        if product not in products:
+            products.append(product)
+    if not products:
+        raise ValueError("At least one allowed product is required.")
+    return products
+
+
+def _live_unlock_source(gate_passed: bool, operator_override: bool) -> str:
+    if gate_passed:
+        return "promotion_gate"
+    if operator_override:
+        return "operator_override"
+    return "locked"
+
+
+def _bool_env(value: bool) -> str:
+    return "true" if value else "false"
+
+
+def _update_env_file(path: Path, updates: dict[str, str]) -> None:
+    existing_lines = path.read_text(encoding="utf-8").splitlines() if path.exists() else []
+    seen: set[str] = set()
+    next_lines: list[str] = []
+
+    for line in existing_lines:
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#") or "=" not in line:
+            next_lines.append(line)
+            continue
+        key = line.split("=", 1)[0].strip()
+        if key in updates:
+            next_lines.append(f"{key}={updates[key]}")
+            seen.add(key)
+        else:
+            next_lines.append(line)
+
+    for key, value in updates.items():
+        if key not in seen:
+            next_lines.append(f"{key}={value}")
+
+    path.write_text("\n".join(next_lines) + "\n", encoding="utf-8")
 
 
 def run_paper_simulation() -> TradingAgent:
