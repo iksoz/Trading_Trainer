@@ -1,0 +1,16 @@
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "trading-trainer"
+version = "0.1.0"
+description = "Agentic paper-trading trainer with risk and promotion gates."
+requires-python = ">=3.11"
+dependencies = []
+
+[project.scripts]
+trading-trainer = "trading_trainer.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
