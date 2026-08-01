@@ -61,3 +61,27 @@ class MovingAverageCrossoverStrategy:
             )
 
         return None
+
+
+@dataclass(frozen=True)
+class ShadowPortfolioConfig:
+    symbol: str
+    portfolio_name: str
+    trade_size: int = 1
+
+
+class ShadowPortfolioStrategy:
+    """Buys the selected portfolio's tracked symbols once for shadow testing."""
+
+    def __init__(self, config: ShadowPortfolioConfig) -> None:
+        self.config = config
+
+    def on_bar(self, bar: Bar, current_quantity: int, account_equity: float) -> Order | None:
+        if bar.symbol != self.config.symbol or current_quantity > 0:
+            return None
+        return Order(
+            symbol=bar.symbol,
+            side=Side.BUY,
+            quantity=self.config.trade_size,
+            reason=f"shadowing {self.config.portfolio_name} top holdings",
+        )

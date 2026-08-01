@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Protocol
+from typing import Any, Protocol
 
 from .models import Bar, Fill, Order, OrderType, Position, Side
 
@@ -97,6 +97,38 @@ class PaperBroker:
             timestamp=datetime.combine(bar.day, datetime.min.time()),
             commission=commission,
         )
+
+    def export_state(self) -> dict[str, Any]:
+        return {
+            "cash": self._cash,
+            "trade_count": self._trade_count,
+            "positions": [
+                {
+                    "symbol": position.symbol,
+                    "quantity": position.quantity,
+                    "average_entry_price": position.average_entry_price,
+                }
+                for position in self._positions.values()
+                if position.quantity
+            ],
+        }
+
+    def load_state(
+        self,
+        cash: float,
+        trade_count: int,
+        positions: list[dict[str, Any]],
+    ) -> None:
+        self._cash = cash
+        self._trade_count = trade_count
+        self._positions = {
+            str(item["symbol"]): Position(
+                symbol=str(item["symbol"]),
+                quantity=int(item["quantity"]),
+                average_entry_price=float(item["average_entry_price"]),
+            )
+            for item in positions
+        }
 
     def _fillable_price(self, order: Order, bar: Bar) -> float | None:
         slippage = bar.close * (self._slippage_bps / 10_000)
