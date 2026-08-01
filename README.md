@@ -51,10 +51,66 @@ Webull OpenAPI uses one shared `WEBULL_APP_KEY` and `WEBULL_APP_SECRET` for
 Trading API and Market Data API access. Keep the app secret server-side only;
 do not put it in React or any browser-delivered code.
 
-The current Webull configuration targets production with stocks and ETFs only:
-`WEBULL_ALLOWED_PRODUCTS=stocks,etfs`. Market data is set to a free-first policy
-so the app should use only data available under the current OpenAPI permissions
-until paid quote subscriptions are intentionally added.
+The current Webull configuration targets sandbox paper trading with stocks and
+ETFs only: `WEBULL_ALLOWED_PRODUCTS=stocks,etfs`. Market data is set to a
+free-first policy so the app should use only data available under the current
+OpenAPI permissions until paid quote subscriptions are intentionally added.
+
+For Webull-only paper training, use sandbox credentials and sandbox endpoints:
+
+```env
+WEBULL_ENV=sandbox
+WEBULL_API_HOST=api.sandbox.webull.com
+WEBULL_TRADE_EVENTS_HOST=events-api.sandbox.webull.com
+WEBULL_DATA_STREAM_HOST=data-api.sandbox.webull.com
+WEBULL_SANDBOX_APP_KEY=
+WEBULL_SANDBOX_APP_SECRET=
+WEBULL_SANDBOX_ACCOUNT_ID_INV_CASH=
+WEBULL_SANDBOX_ACCOUNT_ID_INV_MARGIN=
+WEBULL_PAPER_ORDER_ROUTING=sandbox
+```
+
+Install the official Webull SDK before starting the Webull Paper worker:
+
+```powershell
+python -m pip install -e .[webull]
+```
+
+The dashboard exposes separate Webull Paper panels for the individual cash and
+individual margin sandbox accounts. Each account starts its own background
+worker with an isolated paper ledger, pulls Webull sandbox historical bars, runs
+the strategy/risk checks, routes approved stock/ETF orders to that account
+through the Webull sandbox Trading API, and reports account-specific metrics.
+
+Paper history is persisted to SQLite at `PAPER_HISTORY_DB_PATH`, defaulting to
+`.data/paper_history.sqlite3`. The store saves worker state, positions,
+snapshots, fills, and logs so a dashboard restart can keep the paper history
+available.
+
+The dashboard Strategies tab can switch between the 5/20 moving-average
+strategy and a top-holdings shadow strategy based on Trendlyne's US Superstar
+portfolio table. The seeded shadow portfolios include Warren Buffett, Ken
+Fisher, Bill Gates, Ray Dalio, Catherine Wood, and Bill Ackman, using the top
+holdings exposed on the Trendlyne page as the tracked symbols.
+
+The gear button beside the language switch opens a single status page for
+dashboard health, dependency checks, worker errors, broker controls, learner
+recommendations, and the decision journal.
+
+The first agentic-learning foundation is deliberately audit-first:
+
+- unsupported symbols are skipped and logged instead of stopping the worker;
+- sandbox fallback symbols from `WEBULL_PAPER_FALLBACK_SYMBOLS` are appended so
+  a limited Webull sandbox universe can still produce paper snapshots;
+- every hold, skip, risk rejection, manual-review queue, and fill is written to
+  the SQLite decision journal;
+- the evaluator reports return, drawdown, volatility, win rate, risk
+  rejections, and decision counts;
+- the learner proposes recommendations without applying them automatically;
+- policy state can halt, require manual approval, enforce a daily paper order
+  limit, or allow autonomous paper routing;
+- broker controls are configured with `PAPER_TRADING_KILL_SWITCH`,
+  `PAPER_MANUAL_APPROVAL_REQUIRED`, and `MAX_DAILY_ORDER_COUNT`.
 
 ## Project Shape
 
@@ -66,6 +122,10 @@ until paid quote subscriptions are intentionally added.
 - `src/trading_trainer/promotion.py` - paper-to-live promotion evaluator.
 - `src/trading_trainer/live.py` - intentionally disabled live broker stub.
 - `src/trading_trainer/settings.py` - dependency-free `.env` settings loader.
+- `src/trading_trainer/storage.py` - SQLite paper history persistence.
+- `src/trading_trainer/superstar.py` - seeded Trendlyne superstar portfolio catalog.
+- `src/trading_trainer/webull_openapi.py` - official Webull SDK wrapper.
+- `src/trading_trainer/paper_worker.py` - Webull sandbox auto paper worker.
 - `app.py` - single Python entrypoint for the dashboard and API.
 - `frontend/` - React dashboard served by `app.py`.
 
