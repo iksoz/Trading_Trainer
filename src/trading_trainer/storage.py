@@ -7,7 +7,7 @@ from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import Any, Iterator
 
-from .models import Fill, Order, PortfolioSnapshot, Side
+from .models import Fill, Order, OrderType, PortfolioSnapshot, Side
 
 
 class SQLitePaperStore:
@@ -125,7 +125,8 @@ class SQLitePaperStore:
         with self._connect() as conn:
             rows = conn.execute(
                 """
-                SELECT symbol, side, quantity, price, commission, reason, timestamp
+                SELECT symbol, side, quantity, price, commission, reason, timestamp,
+                       product, multiplier, order_type, limit_price
                 FROM fills
                 WHERE account_kind = ?
                 ORDER BY id DESC
@@ -139,7 +140,11 @@ class SQLitePaperStore:
                 symbol=row["symbol"],
                 side=Side(row["side"]),
                 quantity=int(row["quantity"]),
+                order_type=OrderType(row["order_type"] or "market"),
+                limit_price=row["limit_price"],
                 reason=row["reason"],
+                product=row["product"] or "stocks",
+                multiplier=int(row["multiplier"] or 1),
             )
             fills.append(
                 Fill(
@@ -158,9 +163,10 @@ class SQLitePaperStore:
                 """
                 INSERT INTO fills (
                     account_kind, timestamp, symbol, side, quantity,
-                    price, commission, reason, created_at
+                    price, commission, reason, product, multiplier, order_type,
+                    limit_price, created_at
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     account_kind,
@@ -171,6 +177,10 @@ class SQLitePaperStore:
                     fill.price,
                     fill.commission,
                     fill.order.reason,
+                    fill.order.product,
+                    fill.order.multiplier,
+                    fill.order.order_type.value,
+                    fill.order.limit_price,
                     _utc_now(),
                 ),
             )
@@ -358,6 +368,10 @@ class SQLitePaperStore:
                     price REAL NOT NULL,
                     commission REAL NOT NULL,
                     reason TEXT NOT NULL,
+                    product TEXT NOT NULL DEFAULT 'stocks',
+                    multiplier INTEGER NOT NULL DEFAULT 1,
+                    order_type TEXT NOT NULL DEFAULT 'market',
+                    limit_price REAL,
                     created_at TEXT NOT NULL
                 );
 
@@ -393,6 +407,16 @@ class SQLitePaperStore:
                 );
                 """
             )
+            self._ensure_column(conn, "fills", "product", "TEXT NOT NULL DEFAULT 'stocks'")
+            self._ensure_column(conn, "fills", "multiplier", "INTEGER NOT NULL DEFAULT 1")
+            self._ensure_column(conn, "fills", "order_type", "TEXT NOT NULL DEFAULT 'market'")
+            self._ensure_column(conn, "fills", "limit_price", "REAL")
+
+    @staticmethod
+    def _ensure_column(conn: sqlite3.Connection, table: str, column: str, definition: str) -> None:
+        columns = {str(row["name"]) for row in conn.execute(f"PRAGMA table_info({table})")}
+        if column not in columns:
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
 
 
 def _utc_now() -> str:

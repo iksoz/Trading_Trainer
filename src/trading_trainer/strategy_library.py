@@ -1,0 +1,171 @@
+"""Curated, educational stock and options strategy reference material.
+
+The entries deliberately describe structures and risks rather than issue trading
+signals.  They are not connected to the paper-order router.
+"""
+
+from __future__ import annotations
+
+from typing import Any
+
+
+_SOURCES = {
+    "dca": "https://www.investor.gov/introduction-investing/investing-basics/glossary/dollar-cost-averaging",
+    "diversification": "https://www.investor.gov/introduction-investing/investing-basics/glossary/diversification",
+    "finra_options": "https://www.finra.org/investors/investing/investment-products/options",
+    "covered_call": "https://www.optionseducation.org/news/july-webinar-key-takeaways-hedging-with-options",
+    "protective_put": "https://www.optionseducation.org/strategies/all-strategies/protective-put-married-put",
+    "collar": "https://www.optionseducation.org/strategies/all-strategies/collar-protective-collar",
+    "income_options": "https://www.optionseducation.org/videolibrary/produce-income",
+    "put_options": "https://www.optionseducation.org/videolibrary/buying-and-selling-puts",
+}
+
+
+def strategy_library() -> list[dict[str, Any]]:
+    """Return the displayed playbook in a frontend-friendly format."""
+
+    return [
+        {
+            "id": "moving_average_trend",
+            "name": "Moving-average trend following",
+            "asset_class": "Stocks & ETFs",
+            "outlook": "Bullish while the trend persists",
+            "structure": "Buy after a shorter moving average rises above a longer one; exit when it reverses.",
+            "use_case": "A rules-based way to participate in sustained trends.",
+            "risk": "Whipsaws in sideways markets can create repeated small losses; size positions and predefine exits.",
+            "source_label": "App paper-strategy rules",
+            "source_url": "",
+        },
+        {
+            "id": "breakout",
+            "name": "Breakout with risk stop",
+            "asset_class": "Stocks & ETFs",
+            "outlook": "Bullish after a confirmed move above resistance",
+            "structure": "Enter liquid shares or ETFs after a defined price/volume breakout; place an invalidation stop below the breakout area.",
+            "use_case": "Capturing momentum when price establishes a new range.",
+            "risk": "Breakouts can fail quickly, particularly around news; a stop order is not guaranteed to fill at its trigger price.",
+            "source_label": "Investor.gov: diversification and risk context",
+            "source_url": _SOURCES["diversification"],
+        },
+        {
+            "id": "dollar_cost_averaging",
+            "name": "Dollar-cost averaging",
+            "asset_class": "Stocks, ETFs & funds",
+            "outlook": "Long-term, not a directional trade",
+            "structure": "Invest the same dollar amount at regular intervals regardless of market level.",
+            "use_case": "Building exposure methodically while reducing the temptation to time every entry.",
+            "risk": "Does not prevent losses or ensure a profit; the investment itself may decline and fees still matter.",
+            "source_label": "Investor.gov: Dollar Cost Averaging",
+            "source_url": _SOURCES["dca"],
+        },
+        {
+            "id": "diversified_rebalance",
+            "name": "Diversified allocation & rebalancing",
+            "asset_class": "Portfolio",
+            "outlook": "Risk-managed, long-term",
+            "structure": "Set a target mix across asset types and holdings; periodically restore weights using contributions or trades.",
+            "use_case": "Reducing concentration in a single stock, sector, or market outcome.",
+            "risk": "Diversification cannot eliminate broad market losses; allocation should fit time horizon and risk tolerance.",
+            "source_label": "Investor.gov: Diversification",
+            "source_url": _SOURCES["diversification"],
+        },
+        {
+            "id": "long_call",
+            "name": "Long call",
+            "asset_class": "Options",
+            "outlook": "Bullish",
+            "structure": "Buy one call for the right to buy 100 shares at the strike before expiration.",
+            "use_case": "Defined-premium directional exposure when a substantial upside move is expected before expiry.",
+            "risk": "The entire premium can be lost; time decay and implied-volatility changes can hurt even if the stock rises modestly.",
+            "source_label": "FINRA: Options",
+            "source_url": _SOURCES["finra_options"],
+        },
+        {
+            "id": "long_put",
+            "name": "Long put",
+            "asset_class": "Options",
+            "outlook": "Bearish or hedging",
+            "structure": "Buy one put for the right to sell 100 shares at the strike before expiration.",
+            "use_case": "Defined-premium downside view or temporary protection for a holding.",
+            "risk": "The premium can expire worthless; time decay and volatility changes matter.",
+            "source_label": "FINRA: Options",
+            "source_url": _SOURCES["finra_options"],
+        },
+        {
+            "id": "covered_call",
+            "name": "Covered call",
+            "asset_class": "Stock + options",
+            "outlook": "Neutral to moderately bullish",
+            "structure": "Own 100 shares and sell one call against them to collect a premium.",
+            "use_case": "Seeking premium income while willing to sell the shares at the strike.",
+            "risk": "The underlying stock can still decline substantially and upside is capped if the shares are called away.",
+            "source_label": "OIC: Covered calls and hedging",
+            "source_url": _SOURCES["covered_call"],
+        },
+        {
+            "id": "cash_secured_put",
+            "name": "Cash-secured put",
+            "asset_class": "Options",
+            "outlook": "Neutral to moderately bullish",
+            "structure": "Sell a put while reserving enough cash to buy 100 shares at the strike if assigned.",
+            "use_case": "Potentially earn premium while expressing willingness to own the stock at a chosen effective entry price.",
+            "risk": "Assignment can require buying shares during a decline; cash must be genuinely available and losses can be substantial.",
+            "source_label": "OIC: Potential income generation",
+            "source_url": _SOURCES["income_options"],
+        },
+        {
+            "id": "protective_put",
+            "name": "Protective put",
+            "asset_class": "Stock + options",
+            "outlook": "Bullish long-term, cautious short-term",
+            "structure": "Own shares and buy a put with the same underlying to establish a floor for the life of the option.",
+            "use_case": "Temporary downside protection without selling the stock.",
+            "risk": "The put premium reduces returns and protection ends at expiration; the share position remains exposed down to the put strike.",
+            "source_label": "OIC: Protective Put",
+            "source_url": _SOURCES["protective_put"],
+        },
+        {
+            "id": "collar",
+            "name": "Protective collar",
+            "asset_class": "Stock + options",
+            "outlook": "Cautiously bullish",
+            "structure": "Own shares, buy a put, and sell a call with the same expiration to help offset the put cost.",
+            "use_case": "Defining a temporary downside floor while accepting a ceiling on gains.",
+            "risk": "The call can lead to assignment and caps upside; strike selection changes both protection and cost.",
+            "source_label": "OIC: Protective Collar",
+            "source_url": _SOURCES["collar"],
+        },
+        {
+            "id": "bull_call_spread",
+            "name": "Bull call debit spread",
+            "asset_class": "Options",
+            "outlook": "Moderately bullish",
+            "structure": "Buy a lower-strike call and sell a higher-strike call with the same expiration.",
+            "use_case": "A defined-risk alternative to a long call when upside expectations are limited.",
+            "risk": "Both gain and loss are capped; the debit can be lost and early assignment of the short call is possible.",
+            "source_label": "FINRA: Options and multi-leg risk",
+            "source_url": _SOURCES["finra_options"],
+        },
+        {
+            "id": "bear_put_spread",
+            "name": "Bear put debit spread",
+            "asset_class": "Options",
+            "outlook": "Moderately bearish",
+            "structure": "Buy a higher-strike put and sell a lower-strike put with the same expiration.",
+            "use_case": "A defined-risk bearish position when buying a put outright appears costly.",
+            "risk": "Both gain and loss are capped; the debit can be lost and multi-leg positions require active expiration management.",
+            "source_label": "OIC: Buying and Selling Puts",
+            "source_url": _SOURCES["put_options"],
+        },
+        {
+            "id": "iron_condor",
+            "name": "Iron condor",
+            "asset_class": "Options",
+            "outlook": "Range-bound / neutral",
+            "structure": "Sell an out-of-the-money put spread and call spread with the same expiration for a net credit.",
+            "use_case": "A defined-risk premium strategy when the underlying is expected to remain within a range.",
+            "risk": "A large move toward either wing can create losses; max loss, buying power, liquidity, and assignment risk must be understood first.",
+            "source_label": "OIC: Potential income generation",
+            "source_url": _SOURCES["income_options"],
+        },
+    ]

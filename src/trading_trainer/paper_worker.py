@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 import threading
+from math import ceil
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
 from .broker import PaperBroker
-from .models import Bar, Fill, PortfolioSnapshot, Side
+from .models import Bar, Fill, Order, OrderType, PortfolioSnapshot, Side
+from .public_market_data import PublicMarketDataError, fetch_yahoo_latest_bar
+from .rate_limit import WebullOrderRateLimiter
 from .learning import (
     evaluate_history,
     learner_recommendations,
@@ -30,6 +33,10 @@ from .webull_openapi import WebullOpenApiClient, WebullOpenApiError, WebullSdkMi
 
 class PaperWorkerError(RuntimeError):
     pass
+
+
+# Both Cash and Margin workers share one broker allowance.
+WEBULL_ORDER_RATE_LIMITER = WebullOrderRateLimiter()
 
 
 class PaperTradingWorker:
@@ -81,6 +88,130 @@ class PaperTradingWorker:
         with self._lock:
             self._log(f"Webull sandbox {self.account_label} paper worker stopped.")
             return self.status()
+
+    def submit_manual_order(
+        self,
+        *,
+        product: str,
+        symbol: str,
+        side: str,
+        quantity: int,
+        order_type: str,
+        limit_price: float | None,
+        price: float,
+    ) -> dict[str, Any]:
+        """Execute a user-entered paper trade in this worker's isolated ledger."""
+        with self._lock:
+            settings = load_settings(self.env_path)
+            normalized_product = product.strip().lower()
+            normalized_symbol = symbol.strip().upper()
+            try:
+                parsed_side = Side(side.strip().lower())
+                parsed_order_type = OrderType(order_type.strip().lower())
+            except ValueError as exc:
+                raise ValueError("Side must be buy or sell and order type must be market or limit.") from exc
+            if normalized_product not in {item.lower() for item in settings.webull_allowed_products}:
+                raise ValueError(f"{normalized_product} is not enabled in Allowed Products.")
+            if not normalized_symbol:
+                raise ValueError("Symbol is required.")
+            if quantity < 1:
+                raise ValueError("Quantity must be a positive whole number.")
+            if price <= 0:
+                raise ValueError("Reference price must be greater than zero.")
+            if parsed_order_type is OrderType.LIMIT and (limit_price is None or limit_price <= 0):
+                raise ValueError("Limit orders require a limit price greater than zero.")
+            if settings.paper_trading_kill_switch:
+                raise ValueError("Paper trading kill switch is enabled.")
+            if self._orders_today() >= settings.max_daily_order_count:
+                raise ValueError("Daily paper order limit has been reached.")
+
+            multiplier = 100 if normalized_product == "options" else 1
+            order = Order(
+                symbol=normalized_symbol,
+                side=parsed_side,
+                quantity=quantity,
+                order_type=parsed_order_type,
+                limit_price=limit_price,
+                reason="manual dashboard trade",
+                product=normalized_product,
+                multiplier=multiplier,
+            )
+            bar = Bar(
+                symbol=normalized_symbol,
+                day=datetime.now(UTC).date(),
+                open=price,
+                high=price,
+                low=price,
+                close=price,
+            )
+            equity_before = self._broker.equity(self._latest_prices)
+            account_check = self._risk.validate_account_state(
+                self._max_drawdown(equity_before), 0.0
+            )
+            if not account_check.approved:
+                raise ValueError(account_check.reason)
+            position = self._broker.position(order.position_key, order.multiplier)
+            order_check = self._risk.validate_order(
+                order=order,
+                price=price,
+                account_equity=equity_before,
+                current_position_quantity=position.quantity,
+            )
+            if not order_check.approved:
+                self._record_decision(
+                    symbol=normalized_symbol,
+                    strategy="manual",
+                    signal=parsed_side.value,
+                    confidence=1.0,
+                    action="manual_risk_rejected",
+                    reason=order_check.reason,
+                    risk_result="rejected",
+                    order_payload=_order_payload(order),
+                    metadata={"product": normalized_product, "reference_price": price},
+                )
+                raise ValueError(order_check.reason)
+
+            fill = self._broker.submit_order(order, bar)
+            if fill is None:
+                self._record_decision(
+                    symbol=normalized_symbol,
+                    strategy="manual",
+                    signal=parsed_side.value,
+                    confidence=1.0,
+                    action="manual_limit_open",
+                    reason="limit price was not reached at the supplied reference price",
+                    risk_result="approved",
+                    order_payload=_order_payload(order),
+                    metadata={"product": normalized_product, "reference_price": price},
+                )
+                self._log(f"Manual {normalized_product} limit order remains open: {normalized_symbol}.")
+                return {"status": "open", "message": "Limit price was not reached; no paper fill recorded."}
+
+            self._latest_prices[order.position_key] = fill.price
+            self._fills.append(fill)
+            self._store.record_fill(self.account_kind, fill)
+            self._record_decision(
+                symbol=normalized_symbol,
+                strategy="manual",
+                signal=parsed_side.value,
+                confidence=1.0,
+                action="manual_filled",
+                reason=order.reason,
+                risk_result="approved",
+                order_payload=_order_payload(order),
+                metadata={
+                    "product": normalized_product,
+                    "reference_price": price,
+                    "account_equity": equity_before,
+                },
+            )
+            self._snapshot(bar)
+            self._refresh_memory()
+            self._log(
+                f"Manual {normalized_product} paper fill: {parsed_side.value} "
+                f"{quantity} {normalized_symbol} in {self.account_label}."
+            )
+            return {"status": "filled", "message": "Manual paper trade filled."}
 
     def status(self) -> dict[str, Any]:
         with self._lock:
@@ -168,8 +299,8 @@ class PaperTradingWorker:
         successful_bars = 0
         for symbol in symbols:
             try:
-                bar = client.fetch_latest_bar(symbol)
-            except WebullOpenApiError as exc:
+                bar = self._fetch_latest_bar(settings, client, symbol)
+            except (WebullOpenApiError, PublicMarketDataError) as exc:
                 self._symbol_errors[symbol] = str(exc)
                 self._record_decision(
                     symbol=symbol,
@@ -195,6 +326,21 @@ class PaperTradingWorker:
             elif self._symbol_errors:
                 self._last_error = "All active symbols failed market-data fetch."
 
+    def _fetch_latest_bar(
+        self,
+        settings: AppSettings,
+        client: WebullOpenApiClient,
+        symbol: str,
+    ) -> Bar:
+        source = settings.webull_paper_data_source.strip().lower()
+        if source == "public_yahoo":
+            return fetch_yahoo_latest_bar(symbol)
+        if source == "webull_historical":
+            return client.fetch_latest_bar(symbol)
+        raise PaperWorkerError(
+            "WEBULL_PAPER_DATA_SOURCE must be 'public_yahoo' or 'webull_historical'."
+        )
+
     def _process_bar(
         self,
         settings: AppSettings,
@@ -202,7 +348,7 @@ class PaperTradingWorker:
         bar: Bar,
     ) -> None:
         strategy = self._strategy_for(bar.symbol, settings)
-        self._latest_prices[bar.symbol] = bar.close
+        self._latest_prices[f"stocks:{bar.symbol}"] = bar.close
         equity_before = self._broker.equity(self._latest_prices)
         previous_equity = self._snapshots[-1].equity if self._snapshots else equity_before
         daily_return = (equity_before - previous_equity) / previous_equity if previous_equity else 0.0
@@ -223,7 +369,7 @@ class PaperTradingWorker:
             self._log(f"Risk blocked account action: {account_check.reason}")
             return
 
-        position = self._broker.position(bar.symbol)
+        position = self._broker.position(f"stocks:{bar.symbol}")
         order = strategy.on_bar(bar, position.quantity, equity_before)
         if order is None:
             self._snapshot(bar)
@@ -306,9 +452,33 @@ class PaperTradingWorker:
             return
 
         if settings.webull_paper_order_routing == "sandbox":
+            rate_limit = WEBULL_ORDER_RATE_LIMITER.acquire(
+                min_interval_seconds=settings.webull_order_min_interval_seconds,
+                max_orders_per_minute=settings.webull_order_max_per_minute,
+            )
+            if not rate_limit.allowed:
+                retry_after = max(1, ceil(rate_limit.retry_after_seconds))
+                reason = f"Webull order throttle active; retry in about {retry_after} seconds."
+                self._snapshot(bar)
+                self._record_decision(
+                    symbol=bar.symbol,
+                    strategy=settings.paper_strategy,
+                    signal=order.side.value,
+                    confidence=0.5,
+                    action="blocked_by_broker_rate_limit",
+                    reason=reason,
+                    risk_result="approved",
+                    order_payload=_order_payload(order),
+                )
+                self._log(f"{reason} Blocked {order.side.value} {order.symbol}.")
+                return
             try:
                 result = client.place_stock_order(self._account_id(settings), order)
             except WebullOpenApiError as exc:
+                if _is_broker_rate_limited(str(exc)):
+                    WEBULL_ORDER_RATE_LIMITER.cool_down(
+                        settings.webull_order_429_cooldown_seconds
+                    )
                 self._snapshot(bar)
                 self._record_decision(
                     symbol=bar.symbol,
@@ -509,6 +679,8 @@ def _fill_payload(fill: Fill) -> dict[str, Any]:
     return {
         "day": fill.timestamp.date().isoformat(),
         "symbol": fill.order.symbol,
+        "product": fill.order.product,
+        "multiplier": fill.order.multiplier,
         "side": fill.order.side.value,
         "quantity": fill.quantity,
         "price": round(fill.price, 2),
@@ -526,7 +698,14 @@ def _order_payload(order: Any) -> dict[str, Any]:
         "order_type": order.order_type.value,
         "limit_price": order.limit_price,
         "reason": order.reason,
+        "product": order.product,
+        "multiplier": order.multiplier,
     }
+
+
+def _is_broker_rate_limited(message: str) -> bool:
+    normalized = message.upper()
+    return "429" in normalized or "TOO_MANY_REQUESTS" in normalized
 
 
 def _snapshot_payload(snapshot: PortfolioSnapshot) -> dict[str, Any]:

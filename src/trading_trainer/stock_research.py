@@ -13,6 +13,7 @@ import statistics
 import urllib.parse
 import urllib.request
 import xml.etree.ElementTree as ET
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 from typing import Any
 
@@ -28,6 +29,13 @@ UP_KEYWORDS = (
 DOWN_KEYWORDS = (
     "miss", "cuts forecast", "cut forecast", "downgrade", "underperform", "sell rating",
     "investigation", "lawsuit", "recall", "offering", "warning", "decline", "layoffs",
+)
+DAILY_WATCHLIST_UNIVERSE = (
+    ("AI & semiconductors", ("NVDA", "AMD", "AVGO", "MU"), "Watch AI demand, data-center spending, product updates, and valuation-sensitive earnings."),
+    ("Cloud & enterprise software", ("MSFT", "AMZN", "GOOGL", "ORCL"), "Watch cloud growth, AI monetization, enterprise budgets, and guidance."),
+    ("Consumer & mobility", ("TSLA", "NFLX", "WMT", "COST"), "Watch consumer demand, pricing, margins, product news, and forward outlook."),
+    ("Financials", ("JPM", "GS", "V", "MA"), "Watch rates, credit conditions, capital-markets activity, and earnings."),
+    ("Health care", ("LLY", "UNH", "ABBV", "ISRG"), "Watch clinical data, regulatory decisions, supply updates, and demand commentary."),
 )
 
 
@@ -63,6 +71,72 @@ def analyze_stock(symbol: object, option: object | None = None) -> dict[str, obj
     if option is not None:
         result["option"] = evaluate_long_option(option, market.get("price"))
     return result
+
+
+def daily_watchlist() -> dict[str, object]:
+    """Return five market-driven research candidates with fresh price snapshots.
+
+    The strongest market signal in each of five themes is selected from a
+    liquid universe. This makes the list responsive to the day's prices while
+    retaining a diversified set of research lenses.
+    """
+    candidates = tuple(
+        symbol
+        for _, symbols, _ in DAILY_WATCHLIST_UNIVERSE
+        for symbol in symbols
+    )
+    market_by_symbol: dict[str, dict[str, object]] = {}
+    with ThreadPoolExecutor(max_workers=len(candidates)) as executor:
+        requests = {executor.submit(_fetch_market_data, symbol): symbol for symbol in candidates}
+        for future in as_completed(requests):
+            symbol = requests[future]
+            try:
+                market_by_symbol[symbol] = future.result()
+            except RuntimeError:
+                market_by_symbol[symbol] = {"symbol": symbol, "available": False}
+
+    items = []
+    for theme, symbols, research_lens in DAILY_WATCHLIST_UNIVERSE:
+        symbol = max(symbols, key=lambda item: _daily_signal_score(market_by_symbol[item]))
+        market = market_by_symbol[symbol]
+        reason = _watchlist_reason(market, research_lens)
+        items.append({
+            "symbol": symbol,
+            "theme": theme,
+            "reason": reason,
+            "price": market.get("price"),
+            "change_pct": market.get("change_pct"),
+            "trend": market.get("trend"),
+            "available": market.get("available", False),
+        })
+    return {
+        "items": items,
+        "generated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "notice": "One stock per theme is selected from current public market data using its daily move and distance from the 20-day average. This is a daily research watchlist only—not personalized investment advice or a recommendation to buy or sell any security.",
+    }
+
+
+def _daily_signal_score(market: dict[str, object]) -> float:
+    if not market.get("available"):
+        return -1.0
+    change = abs(float(market.get("change_pct") or 0.0))
+    price = float(market.get("price") or 0.0)
+    average_20 = float(market.get("average_20_day") or 0.0)
+    distance_from_average = abs((price - average_20) / average_20 * 100) if average_20 else 0.0
+    return change + distance_from_average
+
+
+def _watchlist_reason(market: dict[str, object], research_lens: str) -> str:
+    if not market.get("available"):
+        return f"Market snapshot was unavailable. {research_lens}"
+    move = float(market.get("change_pct") or 0.0)
+    price = float(market.get("price") or 0.0)
+    average_20 = float(market.get("average_20_day") or 0.0)
+    distance = ((price - average_20) / average_20 * 100) if average_20 else 0.0
+    return (
+        f"Selected for the strongest current price signal in this theme: "
+        f"{move:+.2f}% today and {distance:+.2f}% versus its 20-day average. {research_lens}"
+    )
 
 
 def evaluate_long_option(option: object, market_price: object | None = None) -> dict[str, object]:

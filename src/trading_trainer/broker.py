@@ -53,12 +53,17 @@ class PaperBroker:
     def trade_count(self) -> int:
         return self._trade_count
 
-    def position(self, symbol: str) -> Position:
-        return self._positions.setdefault(symbol, Position(symbol=symbol))
+    def position(self, symbol: str, multiplier: int = 1) -> Position:
+        # Preserve the original stock-symbol lookup used by strategies and callers.
+        if ":" not in symbol and f"stocks:{symbol}" in self._positions:
+            return self._positions[f"stocks:{symbol}"]
+        return self._positions.setdefault(symbol, Position(symbol=symbol, multiplier=multiplier))
 
     def equity(self, prices: dict[str, float]) -> float:
         positions_value = sum(
-            position.market_value(prices.get(symbol, position.average_entry_price))
+            position.market_value(
+                prices.get(symbol, prices.get(symbol.split(":", 1)[-1], position.average_entry_price))
+            )
             for symbol, position in self._positions.items()
         )
         return self._cash + positions_value
@@ -81,13 +86,13 @@ class PaperBroker:
             if total_cost > self._cash:
                 raise ValueError("Insufficient paper cash for order.")
             self._cash -= total_cost
-            self._add_position(order.symbol, order.quantity, fill_price)
+            self._add_position(order.position_key, order.quantity, fill_price, order.multiplier)
         else:
-            position = self.position(order.symbol)
+            position = self.position(order.position_key, order.multiplier)
             if order.quantity > position.quantity:
                 raise ValueError("Cannot sell more than the paper position holds.")
             self._cash += notional - commission
-            self._remove_position(order.symbol, order.quantity)
+            self._remove_position(order.position_key, order.quantity)
 
         self._trade_count += 1
         return Fill(
@@ -107,6 +112,7 @@ class PaperBroker:
                     "symbol": position.symbol,
                     "quantity": position.quantity,
                     "average_entry_price": position.average_entry_price,
+                    "multiplier": position.multiplier,
                 }
                 for position in self._positions.values()
                 if position.quantity
@@ -126,6 +132,7 @@ class PaperBroker:
                 symbol=str(item["symbol"]),
                 quantity=int(item["quantity"]),
                 average_entry_price=float(item["average_entry_price"]),
+                multiplier=int(item.get("multiplier", 1)),
             )
             for item in positions
         }
@@ -143,8 +150,10 @@ class PaperBroker:
             return max(order.limit_price, bar.close - slippage)
         return None
 
-    def _add_position(self, symbol: str, quantity: int, fill_price: float) -> None:
-        position = self.position(symbol)
+    def _add_position(
+        self, symbol: str, quantity: int, fill_price: float, multiplier: int
+    ) -> None:
+        position = self.position(symbol, multiplier)
         previous_cost = position.quantity * position.average_entry_price
         added_cost = quantity * fill_price
         position.quantity += quantity

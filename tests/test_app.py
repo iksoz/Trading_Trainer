@@ -90,6 +90,7 @@ class DashboardPayloadTests(TestCase):
                         "PAPER_TRADING_KILL_SWITCH=false",
                         "PAPER_MANUAL_APPROVAL_REQUIRED=false",
                         "MAX_DAILY_ORDER_COUNT=10",
+                        "MAX_RISK_VIOLATIONS=0",
                     ]
                 ),
                 encoding="utf-8",
@@ -103,6 +104,7 @@ class DashboardPayloadTests(TestCase):
                         "paper_trading_kill_switch": True,
                         "paper_manual_approval_required": True,
                         "max_daily_order_count": 4,
+                        "max_risk_violations": 2,
                     }
                 )
 
@@ -111,12 +113,14 @@ class DashboardPayloadTests(TestCase):
             self.assertTrue(payload["settings"]["paper_trading_kill_switch"])
             self.assertTrue(payload["settings"]["paper_manual_approval_required"])
             self.assertEqual(payload["settings"]["max_daily_order_count"], 4)
+            self.assertEqual(payload["settings"]["max_risk_violations"], 2)
             text = env_path.read_text(encoding="utf-8")
             self.assertIn("PAPER_STRATEGY=shadow_portfolio", text)
             self.assertIn("SHADOW_PORTFOLIO=bill_ackman", text)
             self.assertIn("PAPER_TRADING_KILL_SWITCH=true", text)
             self.assertIn("PAPER_MANUAL_APPROVAL_REQUIRED=true", text)
             self.assertIn("MAX_DAILY_ORDER_COUNT=4", text)
+            self.assertIn("MAX_RISK_VIOLATIONS=2", text)
 
     def test_status_payload_contains_health_checks(self) -> None:
         payload = app.build_status_payload()

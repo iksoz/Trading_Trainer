@@ -22,9 +22,11 @@ if str(SRC) not in sys.path:
 
 from trading_trainer.models import PortfolioSnapshot
 from trading_trainer.paper_worker import PaperTradingWorker
-from trading_trainer.promotion import PromotionEvaluator
+from trading_trainer.promotion import PromotionCriteria, PromotionEvaluator
 from trading_trainer.settings import load_settings
 from trading_trainer.stock_research import analyze_stock
+from trading_trainer.stock_research import daily_watchlist
+from trading_trainer.strategy_library import strategy_library
 from trading_trainer.superstar import (
     get_superstar_portfolio,
     superstar_portfolio_keys,
@@ -100,6 +102,8 @@ class DashboardHandler(BaseHTTPRequestHandler):
         if (
             parsed.path != "/api/settings"
             and parsed.path != "/api/stock-analysis"
+            and parsed.path != "/api/daily-watchlist"
+            and parsed.path != "/api/manual-trade"
             and not parsed.path.startswith("/api/paper/")
         ):
             self.send_error(HTTPStatus.NOT_FOUND)
@@ -115,6 +119,10 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 if not isinstance(payload, dict):
                     raise ValueError("Stock analysis payload must be a JSON object.")
                 updated = analyze_stock(payload.get("symbol"), payload.get("option"))
+            elif parsed.path == "/api/daily-watchlist":
+                updated = daily_watchlist()
+            elif parsed.path == "/api/manual-trade":
+                updated = submit_manual_trade(payload)
             else:
                 updated = run_paper_action(parsed.path)
         except ValueError as exc:
@@ -146,10 +154,10 @@ def build_dashboard_payload() -> dict[str, object]:
     paper_accounts = _paper_account_statuses()
     paper_worker = _aggregate_paper_status(paper_accounts)
     snapshots = _aggregate_snapshots(paper_accounts)
-    report = PromotionEvaluator().evaluate(snapshots)
+    criteria = _promotion_criteria(settings)
+    report = PromotionEvaluator(criteria).evaluate(snapshots)
     latest = snapshots[-1] if snapshots else None
     first = snapshots[0] if snapshots else None
-    criteria = PromotionEvaluator().criteria
     live_unlock_source = _live_unlock_source(
         report.approved_for_human_review, settings.live_trading_operator_override
     )
@@ -219,6 +227,7 @@ def build_dashboard_payload() -> dict[str, object]:
             "decisions": paper_worker["decisions"],
             "memories": paper_worker["memories"],
         },
+        "strategy_library": strategy_library(),
         "settings": {
             "allowed_products": list(settings.webull_allowed_products),
             "allowed_product_options": list(ALLOWED_PRODUCT_OPTIONS),
@@ -232,6 +241,7 @@ def build_dashboard_payload() -> dict[str, object]:
             "paper_trading_kill_switch": settings.paper_trading_kill_switch,
             "paper_manual_approval_required": settings.paper_manual_approval_required,
             "max_daily_order_count": settings.max_daily_order_count,
+            "max_risk_violations": settings.max_risk_violations,
             "market_data_policy": settings.market_data_policy,
             "market_data_plan": {
                 "mode": "free_first",
@@ -552,12 +562,47 @@ def run_paper_action(path: str) -> dict[str, object]:
     }
 
 
+def submit_manual_trade(payload: dict[str, object]) -> dict[str, object]:
+    """Submit an account-scoped manual paper ticket from the dashboard."""
+    if not isinstance(payload, dict):
+        raise ValueError("Manual trade payload must be a JSON object.")
+    account_kind = str(payload.get("account_kind", "")).strip().lower()
+    if account_kind not in PAPER_WORKERS:
+        raise ValueError("Choose a valid paper account.")
+
+    product = str(payload.get("product", "")).strip().lower()
+    if product not in ALLOWED_PRODUCT_OPTIONS:
+        raise ValueError("Choose a supported product type.")
+    symbol = str(payload.get("symbol", "")).strip().upper()
+    if not symbol:
+        raise ValueError("Symbol is required.")
+    quantity = _clean_positive_int(payload.get("quantity"), "quantity")
+    price = _clean_positive_float(payload.get("price"), "price")
+    order_type = str(payload.get("order_type", "market")).strip().lower()
+    if order_type not in {"market", "limit"}:
+        raise ValueError("Order type must be market or limit.")
+    raw_limit_price = payload.get("limit_price")
+    limit_price = (
+        _clean_positive_float(raw_limit_price, "limit_price")
+        if raw_limit_price not in (None, "")
+        else None
+    )
+    result = PAPER_WORKERS[account_kind].submit_manual_order(
+        product=product,
+        symbol=symbol,
+        side=str(payload.get("side", "")).strip().lower(),
+        quantity=quantity,
+        order_type=order_type,
+        limit_price=limit_price,
+        price=price,
+    )
+    return {"order": result, "dashboard": build_dashboard_payload()}
+
+
 def update_dashboard_settings(payload: dict[str, object]) -> dict[str, object]:
     if not isinstance(payload, dict):
         raise ValueError("Settings payload must be a JSON object.")
 
-    current = build_dashboard_payload()
-    promotion = current["promotion"]
     current_settings = load_settings(ENV_PATH)
     requested_products = _clean_products(
         payload.get("allowed_products", list(current_settings.webull_allowed_products))
@@ -581,6 +626,10 @@ def update_dashboard_settings(payload: dict[str, object]) -> dict[str, object]:
         payload.get("max_daily_order_count", current_settings.max_daily_order_count),
         "max_daily_order_count",
     )
+    max_risk_violations = _clean_nonnegative_int(
+        payload.get("max_risk_violations", current_settings.max_risk_violations),
+        "max_risk_violations",
+    )
     live_enabled = bool(
         payload.get("live_trading_enabled", current_settings.live_trading_enabled)
     )
@@ -596,7 +645,11 @@ def update_dashboard_settings(payload: dict[str, object]) -> dict[str, object]:
         if confirmation != LIVE_CONFIRMATION_PHRASE:
             raise ValueError("Live trading override requires the exact confirmation phrase.")
 
-    if live_enabled and not promotion["approved_for_human_review"] and not operator_override:
+    snapshots = _aggregate_snapshots(_paper_account_statuses())
+    promotion_gate_passed = PromotionEvaluator(
+        _promotion_criteria(current_settings, max_risk_violations)
+    ).evaluate(snapshots).approved_for_human_review
+    if live_enabled and not promotion_gate_passed and not operator_override:
         raise ValueError("Live trading requires either a passed promotion gate or operator override.")
 
     updates = {
@@ -607,6 +660,7 @@ def update_dashboard_settings(payload: dict[str, object]) -> dict[str, object]:
         "PAPER_TRADING_KILL_SWITCH": _bool_env(kill_switch),
         "PAPER_MANUAL_APPROVAL_REQUIRED": _bool_env(manual_approval),
         "MAX_DAILY_ORDER_COUNT": str(max_daily_order_count),
+        "MAX_RISK_VIOLATIONS": str(max_risk_violations),
         "LIVE_TRADING_ENABLED": _bool_env(live_enabled),
         "LIVE_TRADING_OPERATOR_OVERRIDE": _bool_env(operator_override),
     }
@@ -636,6 +690,16 @@ def _clean_strategy(raw_strategy: object) -> str:
     return strategy
 
 
+def _clean_nonnegative_int(raw_value: object, label: str) -> int:
+    try:
+        value = int(raw_value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{label} must be a whole number.") from exc
+    if value < 0:
+        raise ValueError(f"{label} must be zero or greater.")
+    return value
+
+
 def _clean_shadow_portfolio(raw_portfolio: object) -> str:
     portfolio = str(raw_portfolio).strip().lower()
     if portfolio not in superstar_portfolio_keys():
@@ -657,6 +721,27 @@ def _clean_positive_int(raw_value: object, label: str) -> int:
     if value < 1:
         raise ValueError(f"{label} must be a positive integer.")
     return value
+
+
+def _clean_positive_float(raw_value: object, label: str) -> float:
+    try:
+        value = float(raw_value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{label} must be a positive number.") from exc
+    if value <= 0:
+        raise ValueError(f"{label} must be a positive number.")
+    return value
+
+
+def _promotion_criteria(
+    settings: object, max_risk_violations: int | None = None
+) -> PromotionCriteria:
+    configured_limit = (
+        settings.max_risk_violations
+        if max_risk_violations is None
+        else max_risk_violations
+    )
+    return PromotionCriteria(max_risk_violations=configured_limit)
 
 
 def _history_db_path(configured_path: str) -> Path:
