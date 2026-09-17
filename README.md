@@ -17,6 +17,26 @@ approval, fresh credentials, broker-specific integration, and risk limits.
 - Credentials should only be supplied through environment variables or a secret
   manager, never committed to the repo.
 
+## Security Assessment
+
+An order-integrity penetration test covers the dashboard API, manual paper
+orders, Webull sandbox routing, market-data ingestion, risk controls, SQLite
+persistence, and audit history. The assessment identified gaps involving API
+authentication, client-controlled prices, approval enforcement, request replay,
+market-data freshness, broker reconciliation, numeric validation, and local
+ledger integrity. Keep the application in sandbox mode and the live adapter
+disabled until the high-priority findings are remediated and regression-tested.
+
+See [PENETRATION_TEST_REPORT.md](PENETRATION_TEST_REPORT.md) for the findings,
+evidence, remediation priorities, and required security regression tests. The
+non-destructive proof-of-concept harness runs entirely in temporary directories;
+it does not read the project `.env`, modify `.data`, access the network, or call
+a broker:
+
+```powershell
+python security/order_integrity_pentest.py
+```
+
 ## Promotion Criteria
 
 The default promotion evaluator checks:
