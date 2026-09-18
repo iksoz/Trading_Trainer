@@ -1,7 +1,7 @@
 from unittest import TestCase
 from unittest.mock import patch
 
-from trading_trainer.stock_research import analyze_stock, evaluate_long_option
+from trading_trainer.stock_research import DAILY_WATCHLIST_UNIVERSE, analyze_stock, daily_watchlist, evaluate_long_option
 
 
 class OptionOutcomeTests(TestCase):
@@ -47,3 +47,23 @@ class OptionOutcomeTests(TestCase):
         self.assertEqual(result["symbol"], "AAPL")
         self.assertEqual(result["catalysts"][0]["direction"], "up")
         self.assertTrue(any(item["title"] == "Price trend is constructive" for item in result["catalysts"]))
+
+    def test_daily_watchlist_selects_the_strongest_market_signal_in_each_theme(self) -> None:
+        def market(symbol: str) -> dict[str, object]:
+            multiplier = 8.0 if symbol in {"AMD", "ORCL", "NFLX", "GS", "UNH"} else 1.0
+            return {
+                "symbol": symbol,
+                "available": True,
+                "price": 100.0,
+                "average_20_day": 100.0,
+                "change_pct": multiplier,
+                "trend": "above",
+            }
+
+        with patch("trading_trainer.stock_research._fetch_market_data", side_effect=market):
+            watchlist = daily_watchlist()
+
+        self.assertEqual(len(watchlist["items"]), 5)
+        self.assertEqual([item["symbol"] for item in watchlist["items"]], ["AMD", "ORCL", "NFLX", "GS", "UNH"])
+        self.assertTrue(all(item["available"] for item in watchlist["items"]))
+        self.assertTrue(all("strongest current price signal" in item["reason"] for item in watchlist["items"]))

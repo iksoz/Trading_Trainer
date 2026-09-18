@@ -17,6 +17,26 @@ approval, fresh credentials, broker-specific integration, and risk limits.
 - Credentials should only be supplied through environment variables or a secret
   manager, never committed to the repo.
 
+## Security Assessment
+
+An order-integrity penetration test covers the dashboard API, manual paper
+orders, Webull sandbox routing, market-data ingestion, risk controls, SQLite
+persistence, and audit history. The assessment identified gaps involving API
+authentication, client-controlled prices, approval enforcement, request replay,
+market-data freshness, broker reconciliation, numeric validation, and local
+ledger integrity. Keep the application in sandbox mode and the live adapter
+disabled until the high-priority findings are remediated and regression-tested.
+
+See [PENETRATION_TEST_REPORT.md](PENETRATION_TEST_REPORT.md) for the findings,
+evidence, remediation priorities, and required security regression tests. The
+non-destructive proof-of-concept harness runs entirely in temporary directories;
+it does not read the project `.env`, modify `.data`, access the network, or call
+a broker:
+
+```powershell
+python security/order_integrity_pentest.py
+```
+
 ## Promotion Criteria
 
 The default promotion evaluator checks:
@@ -78,9 +98,28 @@ python -m pip install -e .[webull]
 
 The dashboard exposes separate Webull Paper panels for the individual cash and
 individual margin sandbox accounts. Each account starts its own background
-worker with an isolated paper ledger, pulls Webull sandbox historical bars, runs
-the strategy/risk checks, routes approved stock/ETF orders to that account
-through the Webull sandbox Trading API, and reports account-specific metrics.
+worker with an isolated paper ledger, runs strategy/risk checks, routes approved
+stock/ETF orders to that account through the Webull sandbox Trading API, and
+reports account-specific metrics. The free-first default,
+`WEBULL_PAPER_DATA_SOURCE=public_yahoo`, uses the latest public daily bar for
+paper-worker pricing. Set it to `webull_historical` only after enabling the
+separate Webull OpenAPI U.S. market-data subscription; otherwise the sandbox
+returns `UNSUPPORTED_SYMBOL` for otherwise valid U.S. tickers.
+
+To avoid Webull request bursts, both account workers share a conservative broker
+order throttle: one order every 10 seconds, with a maximum of 6 orders per
+minute. A broker `429 TOO_MANY_REQUESTS` response pauses further sandbox order
+attempts for 120 seconds. Adjust these limits only if your verified Webull plan
+permits a higher rate: `WEBULL_ORDER_MIN_INTERVAL_SECONDS`,
+`WEBULL_ORDER_MAX_PER_MINUTE`, and `WEBULL_ORDER_429_COOLDOWN_SECONDS`.
+
+The dashboard's **Manual Trade** tab also lets you enter an account-specific
+paper ticket for any product enabled in **Allowed Products** (stocks, ETFs,
+options, futures, crypto, or event contracts). Select Cash or Margin, then
+provide the symbol, side, quantity, order type, and a reference price. Manual
+trades run through the same paper risk and daily-order controls and are written
+to the account's audit trail. They never send a live broker order. Option
+premiums use a 100-share contract multiplier.
 
 Paper history is persisted to SQLite at `PAPER_HISTORY_DB_PATH`, defaulting to
 `.data/paper_history.sqlite3`. The store saves worker state, positions,
@@ -93,9 +132,9 @@ portfolio table. The seeded shadow portfolios include Warren Buffett, Ken
 Fisher, Bill Gates, Ray Dalio, Catherine Wood, and Bill Ackman, using the top
 holdings exposed on the Trendlyne page as the tracked symbols.
 
-The gear button beside the language switch opens a single status page for
-dashboard health, dependency checks, worker errors, broker controls, learner
-recommendations, and the decision journal.
+The Status tab beside Controls shows dashboard health, dependency checks,
+worker errors, broker controls, learner recommendations, and the decision
+journal.
 
 The first agentic-learning foundation is deliberately audit-first:
 

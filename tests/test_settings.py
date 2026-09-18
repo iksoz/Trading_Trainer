@@ -33,6 +33,7 @@ class SettingsTests(TestCase):
                         "PAPER_TRADING_KILL_SWITCH=true",
                         "PAPER_MANUAL_APPROVAL_REQUIRED=true",
                         "MAX_DAILY_ORDER_COUNT=3",
+                        "MAX_RISK_VIOLATIONS=2",
                         "LIVE_TRADING_OPERATOR_OVERRIDE=true",
                         "MAX_DAILY_LOSS_PCT=0.02",
                     ]
@@ -63,5 +64,6 @@ class SettingsTests(TestCase):
             self.assertTrue(settings.paper_trading_kill_switch)
             self.assertTrue(settings.paper_manual_approval_required)
             self.assertEqual(settings.max_daily_order_count, 3)
+            self.assertEqual(settings.max_risk_violations, 2)
             self.assertTrue(settings.live_trading_operator_override)
             self.assertEqual(settings.max_daily_loss_pct, 0.02)

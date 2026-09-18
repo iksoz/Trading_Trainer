@@ -34,9 +34,16 @@ class Order:
     order_type: OrderType = OrderType.MARKET
     limit_price: float | None = None
     reason: str = ""
+    product: str = "stocks"
+    multiplier: int = 1
+
+    @property
+    def position_key(self) -> str:
+        """Keep positions for different product types with the same symbol separate."""
+        return f"{self.product}:{self.symbol}"
 
     def notional_at(self, price: float) -> float:
-        return self.quantity * price
+        return self.quantity * price * self.multiplier
 
 
 @dataclass(frozen=True)
@@ -49,7 +56,7 @@ class Fill:
 
     @property
     def notional(self) -> float:
-        return self.price * self.quantity
+        return self.price * self.quantity * self.order.multiplier
 
 
 @dataclass
@@ -57,9 +64,10 @@ class Position:
     symbol: str
     quantity: int = 0
     average_entry_price: float = 0.0
+    multiplier: int = 1
 
     def market_value(self, price: float) -> float:
-        return self.quantity * price
+        return self.quantity * price * self.multiplier
 
 
 @dataclass(frozen=True)

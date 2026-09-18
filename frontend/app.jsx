@@ -5,6 +5,7 @@ function App() {
   const [error, setError] = useState("");
   const [saving, setSaving] = useState(false);
   const [paperBusy, setPaperBusy] = useState(false);
+  const [manualTradeBusy, setManualTradeBusy] = useState(false);
   const [activeTab, setActiveTab] = useState("overview");
   const [language, setLanguage] = useState(() => localStorage.getItem("language") || "en");
   const t = useMemo(() => createTranslator(language), [language]);
@@ -73,6 +74,26 @@ function App() {
     }
   }
 
+  async function submitManualTrade(ticket) {
+    setManualTradeBusy(true);
+    setError("");
+    try {
+      const response = await fetch("/api/manual-trade", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(ticket),
+      });
+      const payload = await readApiPayload(response);
+      if (!response.ok) {
+        throw new Error(payload.error || `Manual trade API returned ${response.status}`);
+      }
+      setData(payload.dashboard);
+      return payload.order;
+    } finally {
+      setManualTradeBusy(false);
+    }
+  }
+
   if (error) {
     return (
       <main className="shell">
@@ -99,14 +120,13 @@ function App() {
         onRefresh={loadDashboard}
         language={language}
         onLanguageChange={changeLanguage}
-        onStatus={() => setActiveTab("status")}
         t={t}
       />
       <section className="metricGrid">
         <MetricCard icon="◆" tone="positive" label={t("paperEquity")} value={money(data.paper_worker.equity || data.account.equity)} delta={percent(data.paper_worker.total_return || data.account.total_return)} />
         <MetricCard icon="↗" tone="neutral" label={t("promotionTarget")} value="20.00%" delta={`${Math.round(data.promotion.progress.return_to_goal * 100)}% ${t("reached")}`} />
         <MetricCard icon="⌁" tone="neutral" label={t("maxDrawdown")} value={percent(data.account.max_drawdown)} delta={`${Math.round(data.promotion.progress.drawdown_health * 100)}% ${t("buffer")}`} />
-        <MetricCard icon="◉" tone="warning" label={t("riskViolations")} value={data.paper_worker.risk_violations || data.account.risk_violations} delta={t("mustStayZero")} />
+        <MetricCard icon="◉" tone="warning" label={t("riskViolations")} value={data.paper_worker.risk_violations || data.account.risk_violations} delta={`≤ ${data.promotion.criteria.max_risk_violations}`} />
       </section>
       <section className="workspace">
         <aside className="sidePanel">
@@ -126,6 +146,7 @@ function App() {
           <Tabs activeTab={activeTab} onChange={setActiveTab} t={t} />
           {activeTab === "overview" && <Overview data={data} t={t} />}
           {activeTab === "research" && <StockResearch />}
+          {activeTab === "manual" && <ManualTrade data={data} busy={manualTradeBusy} onSubmit={submitManualTrade} t={t} />}
           {activeTab === "trades" && <Trades fills={data.paper_worker.fills.length ? data.paper_worker.fills : data.fills} t={t} />}
           {activeTab === "portfolios" && <StrategyLab data={data} saving={saving} onSave={saveSettings} t={t} />}
           {activeTab === "status" && <StatusPage data={data} t={t} />}
@@ -143,20 +164,13 @@ function App() {
   );
 }
 
-function Header({ data, onRefresh, language, onLanguageChange, onStatus, t }) {
+function Header({ data, onRefresh, language, onLanguageChange, t }) {
   return (
     <header className="topbar">
       <div className="brandBlock">
         <div className="brandMark" aria-hidden="true"><span /></div>
         <div>
-          <p className="eyebrow">{t("commandCenter")}</p>
           <h1>Trading Trainer</h1>
-          <p className="muted">
-            {data.run_window.start
-              ? `${data.run_window.start} ${t("to")} ${data.run_window.end} · `
-              : `${t("waitingForPaper")} · `}
-            {t("generated")} {formatTime(data.generated_at)}
-          </p>
         </div>
       </div>
       <div className="topActions">
@@ -164,9 +178,6 @@ function Header({ data, onRefresh, language, onLanguageChange, onStatus, t }) {
           <button className={language === "en" ? "active" : ""} onClick={() => onLanguageChange("en")}>EN</button>
           <button className={language === "zh" ? "active" : ""} onClick={() => onLanguageChange("zh")}>中文</button>
         </div>
-        <button className="iconButton" onClick={onStatus} aria-label={t("systemStatus")} title={t("systemStatus")}>
-          ⚙
-        </button>
         <span className={`statusPill ${data.status}`}>{data.status === "review_ready" ? t("reviewReady") : t("liveLocked")}</span>
         <button className="iconButton" onClick={onRefresh} aria-label={t("refresh")} title={t("refresh")}>
           ↻
@@ -290,9 +301,11 @@ function Tabs({ activeTab, onChange, t }) {
   const tabs = [
     ["overview", "◫", t("overview")],
     ["research", "◌", "Stock Research"],
+    ["manual", "✎", t("manualTrade")],
     ["trades", "⇄", t("trades")],
     ["portfolios", "◈", t("strategyLab")],
     ["controls", "⌘", t("controls")],
+    ["status", "◉", t("status")],
   ];
   return (
     <div className="tabs" role="tablist">
@@ -315,6 +328,30 @@ function StockResearch() {
   const [result, setResult] = useState(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
+  const [watchlist, setWatchlist] = useState(null);
+  const [watchlistLoading, setWatchlistLoading] = useState(true);
+
+  async function loadWatchlist() {
+    setWatchlistLoading(true);
+    try {
+      const response = await fetch("/api/daily-watchlist", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: "{}",
+      });
+      const payload = await readApiPayload(response);
+      if (!response.ok) throw new Error(payload.error || "Unable to refresh the daily watchlist.");
+      setWatchlist(payload);
+    } catch (err) {
+      setWatchlist({ items: [], notice: err.message });
+    } finally {
+      setWatchlistLoading(false);
+    }
+  }
+
+  useEffect(() => {
+    loadWatchlist();
+  }, []);
 
   async function submit(event) {
     event.preventDefault();
@@ -328,7 +365,7 @@ function StockResearch() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ symbol, option }),
       });
-      const payload = await response.json();
+      const payload = await readApiPayload(response);
       if (!response.ok) throw new Error(payload.error || "Unable to analyze this symbol.");
       setResult(payload);
     } catch (err) {
@@ -340,6 +377,33 @@ function StockResearch() {
 
   return (
     <section className="researchStack">
+      <section className="panel">
+        <div className="panelHeader">
+          <div>
+            <h2>Daily stocks to research</h2>
+            <p className="muted">The strongest market-data signal in each theme is selected fresh from a liquid stock universe. These are research candidates, not buy or sell calls.</p>
+          </div>
+          <button className="secondaryButton" disabled={watchlistLoading} onClick={loadWatchlist}>{watchlistLoading ? "Refreshing…" : "Refresh list"}</button>
+        </div>
+        {watchlistLoading && !watchlist ? <div className="loading">Refreshing daily market snapshots…</div> : (
+          <>
+            <div className="watchlistGrid">
+              {(watchlist?.items || []).map((item) => (
+                <article className="watchlistCard" key={item.symbol}>
+                  <div><strong>{item.symbol}</strong><span>{item.theme}</span></div>
+                  <p>{item.reason}</p>
+                  <div className="watchlistQuote">
+                    <span>{item.available ? money(item.price) : "Price unavailable"}</span>
+                    {item.available && <small className={item.change_pct >= 0 ? "passText" : "lockText"}>{item.change_pct >= 0 ? "+" : ""}{item.change_pct}% · 20/60d {item.trend}</small>}
+                  </div>
+                  <button className="secondaryButton" onClick={() => setSymbol(item.symbol)}>Research {item.symbol}</button>
+                </article>
+              ))}
+            </div>
+            {watchlist?.notice && <p className="watchlistNotice">{watchlist.notice}</p>}
+          </>
+        )}
+      </section>
       <section className="panel">
         <div className="panelHeader">
           <div>
@@ -624,6 +688,8 @@ function StrategyLab({ data, saving, onSave, t }) {
         </button>
       </div>
 
+      <StrategyLibrary strategies={data.strategy_library || []} />
+
       <section className="portfolioGrid">
         {settings.shadow_portfolio_options.map((portfolio) => (
           <article className={`panel portfolioCard ${portfolio.key === shadowPortfolio ? "selected" : ""}`} key={portfolio.key}>
@@ -653,6 +719,59 @@ function StrategyLab({ data, saving, onSave, t }) {
           </article>
         ))}
       </section>
+    </section>
+  );
+}
+
+function StrategyLibrary({ strategies }) {
+  const [filter, setFilter] = useState("All");
+  const filtered = strategies.filter((strategy) => {
+    if (filter === "All") return true;
+    const assetClass = strategy.asset_class.toLowerCase();
+    if (filter === "Stocks") return assetClass.includes("stock");
+    if (filter === "ETFs") return assetClass.includes("etf");
+    return assetClass.includes(filter.toLowerCase());
+  });
+
+  return (
+    <section className="panel strategyLibrary">
+      <div className="panelHeader libraryHeader">
+        <div>
+          <h2>Strategy library</h2>
+          <p className="muted">Research-backed study cards for stocks, ETFs, and options. They are educational only and do not route paper or live orders.</p>
+        </div>
+        <span>{filtered.length} playbooks</span>
+      </div>
+      <div className="libraryFilters" aria-label="Filter strategy library">
+        {["All", "Stocks", "ETFs", "Options", "Portfolio"].map((option) => (
+          <button key={option} className={filter === option ? "active" : ""} onClick={() => setFilter(option)}>{option}</button>
+        ))}
+      </div>
+      <div className="strategyCardGrid">
+        {filtered.map((strategy) => (
+          <article className="strategyCard" key={strategy.id}>
+            <div className="strategyCardTop">
+              <span>{strategy.asset_class}</span>
+              <small>{strategy.outlook}</small>
+            </div>
+            <h3>{strategy.name}</h3>
+            <dl>
+              <dt>Structure</dt><dd>{strategy.structure}</dd>
+              <dt>Use case</dt><dd>{strategy.use_case}</dd>
+              <dt>Watchout</dt><dd>{strategy.risk}</dd>
+            </dl>
+            {strategy.source_url ? (
+              <a href={strategy.source_url} target="_blank" rel="noreferrer">{strategy.source_label} ↗</a>
+            ) : (
+              <small className="strategySource">{strategy.source_label}</small>
+            )}
+          </article>
+        ))}
+      </div>
+      <div className="notice strategyDisclaimer">
+        <strong>Options require brokerage approval.</strong>
+        <span>Review the broker’s options disclosure, contract multiplier, liquidity, assignment and expiration risks before using any options strategy.</span>
+      </div>
     </section>
   );
 }
@@ -781,6 +900,7 @@ function Trades({ fills, t }) {
           <tr>
             <th>{t("day")}</th>
             <th>{t("account")}</th>
+            <th>{t("product")}</th>
             <th>{t("symbol")}</th>
             <th>{t("side")}</th>
             <th>{t("qty")}</th>
@@ -794,6 +914,7 @@ function Trades({ fills, t }) {
             <tr key={`${fill.day}-${fill.side}-${index}`}>
               <td>{fill.day}</td>
               <td>{fill.account_label || t("account")}</td>
+              <td>{productLabel(fill.product || "stocks")}</td>
               <td>{fill.symbol}</td>
               <td><span className={`side ${fill.side}`}>{fill.side}</span></td>
               <td>{fill.quantity}</td>
@@ -803,12 +924,114 @@ function Trades({ fills, t }) {
             </tr>
           )) : (
             <tr>
-              <td colSpan="8">{t("noWebullFills")}</td>
+              <td colSpan="9">{t("noWebullFills")}</td>
             </tr>
           )}
         </tbody>
       </table>
     </div>
+  );
+}
+
+function ManualTrade({ data, busy, onSubmit, t }) {
+  const [accountKind, setAccountKind] = useState(data.paper_accounts[0]?.account_kind || "cash");
+  const [product, setProduct] = useState(data.settings.allowed_products[0] || "stocks");
+  const [symbol, setSymbol] = useState("AAPL");
+  const [side, setSide] = useState("buy");
+  const [quantity, setQuantity] = useState("1");
+  const [orderType, setOrderType] = useState("market");
+  const [price, setPrice] = useState("");
+  const [limitPrice, setLimitPrice] = useState("");
+  const [message, setMessage] = useState("");
+  const [error, setError] = useState("");
+
+  useEffect(() => {
+    if (!data.paper_accounts.some((account) => account.account_kind === accountKind)) {
+      setAccountKind(data.paper_accounts[0]?.account_kind || "cash");
+    }
+    if (!data.settings.allowed_products.includes(product)) {
+      setProduct(data.settings.allowed_products[0] || "stocks");
+    }
+  }, [accountKind, data.paper_accounts, data.settings.allowed_products, product]);
+
+  async function handleSubmit(event) {
+    event.preventDefault();
+    setError("");
+    setMessage("");
+    try {
+      const order = await onSubmit({
+        account_kind: accountKind,
+        product,
+        symbol,
+        side,
+        quantity: Number(quantity),
+        order_type: orderType,
+        price: Number(price),
+        limit_price: orderType === "limit" ? Number(limitPrice) : null,
+      });
+      setMessage(order.message);
+    } catch (err) {
+      setError(err.message);
+    }
+  }
+
+  return (
+    <section className="panel manualTradePanel">
+      <div className="panelHeader">
+        <h2>{t("manualTrade")}</h2>
+        <span>{t("paper")}</span>
+      </div>
+      <p className="muted">{t("manualTradeText")}</p>
+      <form className="manualTradeForm" onSubmit={handleSubmit}>
+        <label className="readOnlyControl">
+          <span>{t("account")}</span>
+          <select value={accountKind} onChange={(event) => setAccountKind(event.target.value)}>
+            {data.paper_accounts.map((account) => <option key={account.account_kind} value={account.account_kind}>{account.account_label}</option>)}
+          </select>
+        </label>
+        <label className="readOnlyControl">
+          <span>{t("product")}</span>
+          <select value={product} onChange={(event) => setProduct(event.target.value)}>
+            {data.settings.allowed_products.map((item) => <option key={item} value={item}>{productLabel(item)}</option>)}
+          </select>
+        </label>
+        <label className="readOnlyControl">
+          <span>{t("symbol")}</span>
+          <input value={symbol} onChange={(event) => setSymbol(event.target.value.toUpperCase())} required />
+        </label>
+        <label className="readOnlyControl">
+          <span>{t("side")}</span>
+          <select value={side} onChange={(event) => setSide(event.target.value)}>
+            <option value="buy">{t("buy")}</option>
+            <option value="sell">{t("sell")}</option>
+          </select>
+        </label>
+        <label className="readOnlyControl">
+          <span>{t("qty")}</span>
+          <input type="number" min="1" step="1" value={quantity} onChange={(event) => setQuantity(event.target.value)} required />
+        </label>
+        <label className="readOnlyControl">
+          <span>{t("orderType")}</span>
+          <select value={orderType} onChange={(event) => setOrderType(event.target.value)}>
+            <option value="market">{t("market")}</option>
+            <option value="limit">{t("limit")}</option>
+          </select>
+        </label>
+        <label className="readOnlyControl">
+          <span>{t("referencePrice")}</span>
+          <input type="number" min="0.0001" step="0.0001" value={price} onChange={(event) => setPrice(event.target.value)} required />
+        </label>
+        {orderType === "limit" && <label className="readOnlyControl">
+          <span>{t("limitPrice")}</span>
+          <input type="number" min="0.0001" step="0.0001" value={limitPrice} onChange={(event) => setLimitPrice(event.target.value)} required />
+        </label>}
+        <button className="saveButton manualTradeButton" disabled={busy} type="submit">{busy ? t("working") : t("placePaperTrade")}</button>
+      </form>
+      {product === "options" && <div className="notice slim"><span>{t("optionsMultiplier")}</span></div>}
+      <div className="notice slim"><span>{t("manualTradeNotice")}</span></div>
+      {message && <div className="notice success slim"><strong>{message}</strong></div>}
+      {error && <div className="notice error slim"><strong>{error}</strong></div>}
+    </section>
   );
 }
 
@@ -821,6 +1044,7 @@ function Controls({ data, saving, onSave, t }) {
   const [killSwitch, setKillSwitch] = useState(settings.paper_trading_kill_switch);
   const [manualApproval, setManualApproval] = useState(settings.paper_manual_approval_required);
   const [maxDailyOrders, setMaxDailyOrders] = useState(settings.max_daily_order_count);
+  const [maxRiskViolations, setMaxRiskViolations] = useState(settings.max_risk_violations);
   const [confirming, setConfirming] = useState(false);
 
   useEffect(() => {
@@ -830,6 +1054,7 @@ function Controls({ data, saving, onSave, t }) {
     setKillSwitch(settings.paper_trading_kill_switch);
     setManualApproval(settings.paper_manual_approval_required);
     setMaxDailyOrders(settings.max_daily_order_count);
+    setMaxRiskViolations(settings.max_risk_violations);
   }, [settings]);
 
   const gatePassed = data.promotion.approved_for_human_review;
@@ -852,6 +1077,7 @@ function Controls({ data, saving, onSave, t }) {
       paper_trading_kill_switch: killSwitch,
       paper_manual_approval_required: manualApproval,
       max_daily_order_count: Number(maxDailyOrders),
+      max_risk_violations: Number(maxRiskViolations),
       live_trading_enabled: liveEnabled,
       live_trading_operator_override: liveNeedsOverride ? operatorOverride : false,
       confirmation,
@@ -879,7 +1105,17 @@ function Controls({ data, saving, onSave, t }) {
           <ReadOnlyControl label={t("sustainedSnapshots")} value={criteria.sustained_return_days} />
           <ReadOnlyControl label={t("maxDrawdown")} value={percent(criteria.max_drawdown)} />
           <ReadOnlyControl label={t("minimumTrades")} value={criteria.min_trades} />
-          <ReadOnlyControl label={t("riskViolations")} value={`≤ ${criteria.max_risk_violations}`} />
+          <label className="readOnlyControl numericControl">
+            <span>{t("riskViolations")}</span>
+            <input
+              type="number"
+              min="0"
+              step="1"
+              value={maxRiskViolations}
+              onChange={(event) => setMaxRiskViolations(event.target.value)}
+              aria-label={t("riskViolations")}
+            />
+          </label>
         </div>
         <div className="switchRow">
           <div>
@@ -943,9 +1179,6 @@ function Controls({ data, saving, onSave, t }) {
           <strong>{t("marketDataPolicy")}</strong>
           <span>{t("marketDataPolicyText")}</span>
         </div>
-        <button className="saveButton" disabled={saving || (liveNeedsOverride && !operatorOverride)} onClick={saveControls}>
-          {saving ? t("saving") : t("saveControls")}
-        </button>
       </div>
 
       <div className="panel">
@@ -977,10 +1210,15 @@ function Controls({ data, saving, onSave, t }) {
           <span>{t("maxDailyOrders")}</span>
           <input type="number" min="1" value={maxDailyOrders} onChange={(event) => setMaxDailyOrders(event.target.value)} />
         </label>
-        <button className="saveButton" disabled={saving} onClick={saveControls}>
-          {saving ? t("saving") : t("saveControls")}
-        </button>
       </div>
+
+      <button
+        className="saveButton"
+        disabled={saving || (liveNeedsOverride && !operatorOverride)}
+        onClick={saveControls}
+      >
+        {saving ? t("saving") : t("saveControls")}
+      </button>
 
       {confirming && (
         <ConfirmLiveDialog
@@ -1051,6 +1289,15 @@ function money(value) {
   return new Intl.NumberFormat("en-US", { style: "currency", currency: "USD", maximumFractionDigits: 2 }).format(value);
 }
 
+async function readApiPayload(response) {
+  const body = await response.text();
+  try {
+    return JSON.parse(body);
+  } catch {
+    throw new Error("The dashboard server returned HTML instead of API data. Restart Trading Trainer so it loads the latest backend.");
+  }
+}
+
 function percent(value) {
   return new Intl.NumberFormat("en-US", { style: "percent", minimumFractionDigits: 2, maximumFractionDigits: 2 }).format(value);
 }
@@ -1110,6 +1357,18 @@ const TRANSLATIONS = {
     marketDataPolicyText: "Use Webull data available under current OpenAPI permissions and avoid paid quote subscriptions until you choose to add them.",
     maxDrawdown: "Max Drawdown",
     maxDailyOrders: "Max daily orders",
+    manualTrade: "Manual Trade",
+    manualTradeText: "Place an account-specific paper trade using your own reference price. Product availability follows Allowed Products.",
+    manualTradeNotice: "This records a paper-ledger trade only. It never routes a live broker order.",
+    market: "Market",
+    orderType: "Order type",
+    optionsMultiplier: "Option premiums are per share; each contract uses a 100-share multiplier.",
+    placePaperTrade: "Place paper trade",
+    product: "Product",
+    referencePrice: "Reference price",
+    limit: "Limit",
+    limitPrice: "Limit price",
+    buy: "Buy",
     manualReview: "Manual review",
     manualReviewText: "Approved decisions are queued in the journal instead of routed.",
     minimumReturn: "Minimum return",
@@ -1232,6 +1491,18 @@ const TRANSLATIONS = {
     marketDataPolicyText: "仅使用当前 Webull OpenAPI 权限下可用的数据，暂不启用付费行情订阅。",
     maxDrawdown: "最大回撤",
     maxDailyOrders: "每日最大订单数",
+    manualTrade: "手动交易",
+    manualTradeText: "使用自定义参考价格为指定账户创建模拟交易。可交易品种遵循“允许交易产品”设置。",
+    manualTradeNotice: "此操作只记录模拟账本交易，绝不会路由真实券商订单。",
+    market: "市价",
+    orderType: "订单类型",
+    optionsMultiplier: "期权权利金按每股计价；每张合约使用 100 股乘数。",
+    placePaperTrade: "提交模拟交易",
+    product: "产品",
+    referencePrice: "参考价格",
+    limit: "限价",
+    limitPrice: "限价价格",
+    buy: "买入",
     manualReview: "人工复核",
     manualReviewText: "通过风控的决策会进入日志队列，而不是直接路由。",
     minimumReturn: "最低收益",

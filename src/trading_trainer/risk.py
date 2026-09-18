@@ -47,7 +47,7 @@ class RiskManager:
             if order.side is Side.BUY
             else current_position_quantity - order.quantity
         )
-        resulting_notional = abs(resulting_quantity * price)
+        resulting_notional = abs(resulting_quantity * price * order.multiplier)
         if resulting_notional > account_equity * self.limits.max_position_pct:
             return self._reject("Resulting position exceeds max position limit.")
 

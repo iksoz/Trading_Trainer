@@ -29,14 +29,18 @@ class AppSettings:
     webull_paper_fallback_symbols: tuple[str, ...] = ("AAPL",)
     webull_paper_poll_seconds: int = 60
     webull_paper_trade_size: int = 1
-    webull_paper_data_source: str = "webull_historical"
+    webull_paper_data_source: str = "public_yahoo"
     webull_paper_order_routing: str = "sandbox"
+    webull_order_min_interval_seconds: float = 10.0
+    webull_order_max_per_minute: int = 6
+    webull_order_429_cooldown_seconds: float = 120.0
     paper_strategy: str = "moving_average"
     shadow_portfolio: str = "warren_buffett"
     paper_history_db_path: str = ".data/paper_history.sqlite3"
     paper_trading_kill_switch: bool = False
     paper_manual_approval_required: bool = False
     max_daily_order_count: int = 10
+    max_risk_violations: int = 0
     live_trading_operator_override: bool = False
     max_daily_loss_pct: float = 0.03
     max_position_pct: float = 0.25
@@ -96,8 +100,17 @@ def load_settings(env_path: Path | str = ".env") -> AppSettings:
         ),
         webull_paper_poll_seconds=_as_int(merged.get("WEBULL_PAPER_POLL_SECONDS", "60"), 60),
         webull_paper_trade_size=_as_int(merged.get("WEBULL_PAPER_TRADE_SIZE", "1"), 1),
-        webull_paper_data_source=merged.get("WEBULL_PAPER_DATA_SOURCE", "webull_historical"),
+        webull_paper_data_source=merged.get("WEBULL_PAPER_DATA_SOURCE", "public_yahoo"),
         webull_paper_order_routing=merged.get("WEBULL_PAPER_ORDER_ROUTING", "sandbox"),
+        webull_order_min_interval_seconds=_as_positive_float(
+            merged.get("WEBULL_ORDER_MIN_INTERVAL_SECONDS", "10"), 10.0
+        ),
+        webull_order_max_per_minute=_as_positive_int(
+            merged.get("WEBULL_ORDER_MAX_PER_MINUTE", "6"), 6
+        ),
+        webull_order_429_cooldown_seconds=_as_positive_float(
+            merged.get("WEBULL_ORDER_429_COOLDOWN_SECONDS", "120"), 120.0
+        ),
         paper_strategy=merged.get("PAPER_STRATEGY", "moving_average"),
         shadow_portfolio=merged.get("SHADOW_PORTFOLIO", "warren_buffett"),
         paper_history_db_path=merged.get(
@@ -110,6 +123,9 @@ def load_settings(env_path: Path | str = ".env") -> AppSettings:
             merged.get("PAPER_MANUAL_APPROVAL_REQUIRED", "false")
         ),
         max_daily_order_count=_as_int(merged.get("MAX_DAILY_ORDER_COUNT", "10"), 10),
+        max_risk_violations=_as_nonnegative_int(
+            merged.get("MAX_RISK_VIOLATIONS", "0"), 0
+        ),
         live_trading_operator_override=_as_bool(
             merged.get("LIVE_TRADING_OPERATOR_OVERRIDE", "false")
         ),
@@ -162,11 +178,26 @@ def _as_float(value: str) -> float:
         return 0.0
 
 
+def _as_positive_float(value: str, default: float) -> float:
+    parsed = _as_float(value)
+    return parsed if parsed > 0 else default
+
+
 def _as_int(value: str, default: int) -> int:
     try:
         return int(value)
     except ValueError:
         return default
+
+
+def _as_positive_int(value: str, default: int) -> int:
+    parsed = _as_int(value, default)
+    return parsed if parsed > 0 else default
+
+
+def _as_nonnegative_int(value: str, default: int) -> int:
+    parsed = _as_int(value, default)
+    return parsed if parsed >= 0 else default
 
 
 def _as_csv_tuple(value: str) -> tuple[str, ...]:
